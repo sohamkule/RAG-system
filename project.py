@@ -4,13 +4,13 @@ import pandas as pd
 import docx
 import fitz  # PyMuPDF
 import io
-import time # 🆕 NEW: For the API Speed Bump
+import time
 from PIL import Image
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict
 import threading
-import wikipedia # 🌐 NEW: Wikipedia Agentic Fallback
+import wikipedia 
 
 from cassandra.cluster import Cluster
 from cassandra.auth import PlainTextAuthProvider
@@ -23,7 +23,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 load_dotenv()
 
 # -------------------------
-# 🔹 Cassandra Connector (Astra DB Native Vector Search)
+# 🔹 Cassandra Connector (Multi-Tenant Enterprise Version)
 # -------------------------
 class VectorDBConnector:
     def __init__(self, secure_connect_bundle_path: str, application_token: str, keyspace: str):
@@ -36,8 +36,9 @@ class VectorDBConnector:
 
     def _create_tables(self):
         self.session.execute("""
-            CREATE TABLE IF NOT EXISTS document_store (
+            CREATE TABLE IF NOT EXISTS document_store_v2 (
                 chunk_id uuid PRIMARY KEY,
+                user_id text,
                 doc_name text,
                 doc_content text,
                 doc_type text,
@@ -48,41 +49,47 @@ class VectorDBConnector:
         """)
         
         self.session.execute("""
-            CREATE CUSTOM INDEX IF NOT EXISTS ann_index 
-            ON document_store(embedding_vector) 
+            CREATE CUSTOM INDEX IF NOT EXISTS ann_index_v2 
+            ON document_store_v2(embedding_vector) 
+            USING 'StorageAttachedIndex'
+        """)
+        
+        self.session.execute("""
+            CREATE CUSTOM INDEX IF NOT EXISTS user_id_index 
+            ON document_store_v2(user_id) 
             USING 'StorageAttachedIndex'
         """)
 
-    def store_document_with_embedding(self, chunk_id: uuid.UUID, doc_name: str, content: str,
+    def store_document_with_embedding(self, chunk_id: uuid.UUID, user_id: str, doc_name: str, content: str,
                                       doc_type: str, embedding_vector: List[float], metadata: Dict[str, str] = None):
-        if metadata is None:
-            metadata = {}
-        
+        if metadata is None: metadata = {}
         query = """
-            INSERT INTO document_store 
-            (chunk_id, doc_name, doc_content, doc_type, embedding_vector, created_at, metadata)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO document_store_v2 
+            (chunk_id, user_id, doc_name, doc_content, doc_type, embedding_vector, created_at, metadata)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         """
-        self.session.execute(query, (chunk_id, doc_name, content, doc_type, embedding_vector, datetime.now(), metadata))
+        self.session.execute(query, (chunk_id, user_id, doc_name, content, doc_type, embedding_vector, datetime.now(), metadata))
 
-    def search_similar_documents(self, query_vector: List[float], top_k: int = 5) -> List[Dict]:
+    def search_similar_documents(self, user_id: str, query_vector: List[float], top_k: int = 5) -> List[Dict]:
         query = """
-            SELECT doc_content, doc_name FROM document_store 
+            SELECT doc_content, doc_name FROM document_store_v2 
+            WHERE user_id = %s
             ORDER BY embedding_vector ANN OF %s LIMIT %s
         """
-        rows = self.session.execute(query, (query_vector, top_k))
+        rows = self.session.execute(query, (user_id, query_vector, top_k))
         return [{"content": row.doc_content, "source": row.doc_name} for row in rows]
 
-    def get_all_documents(self) -> List[str]:
-        rows = self.session.execute("SELECT doc_name FROM document_store")
+    def get_all_documents(self, user_id: str) -> List[str]:
+        query = "SELECT doc_name FROM document_store_v2 WHERE user_id = %s"
+        rows = self.session.execute(query, (user_id,))
         return list(set([row.doc_name for row in rows if row.doc_name]))
 
-    def delete_document(self, doc_name: str) -> int:
-        query = "SELECT chunk_id FROM document_store WHERE doc_name = %s ALLOW FILTERING"
-        rows = self.session.execute(query, (doc_name,))
+    def delete_document(self, user_id: str, doc_name: str) -> int:
+        query = "SELECT chunk_id FROM document_store_v2 WHERE user_id = %s AND doc_name = %s ALLOW FILTERING"
+        rows = self.session.execute(query, (user_id, doc_name))
         deleted_count = 0
         for row in rows:
-            self.session.execute("DELETE FROM document_store WHERE chunk_id = %s", (row.chunk_id,))
+            self.session.execute("DELETE FROM document_store_v2 WHERE chunk_id = %s", (row.chunk_id,))
             deleted_count += 1
         return deleted_count
 
@@ -123,6 +130,7 @@ class DocumentLoader:
                 description = DocumentLoader.describe_image(image_bytes)
                 full_text += description
                 
+                # API Speed Bump
                 time.sleep(4)
                 
         return full_text
@@ -188,7 +196,7 @@ class RAGApplication:
     def generate_embeddings(self, text: str) -> List[float]:
         return self.embedding_model.embed_query(text)
 
-    def add_document(self, file_path: str, metadata: Dict[str, str] = None):
+    def add_document(self, user_id: str, file_path: str, metadata: Dict[str, str] = None):
         content = self.parse_document(file_path)
         if not content: return None
         chunks = self._chunk_text(content)
@@ -199,7 +207,7 @@ class RAGApplication:
             chunk_id = uuid.uuid4()
             embedding_vector = self.generate_embeddings(chunk_text)
             self.vector_db.store_document_with_embedding(
-                chunk_id=chunk_id, doc_name=Path(file_path).name, content=chunk_text,
+                chunk_id=chunk_id, user_id=user_id, doc_name=Path(file_path).name, content=chunk_text,
                 doc_type=Path(file_path).suffix[1:], embedding_vector=embedding_vector, metadata=metadata
             )
             added_chunk_ids.append(chunk_id)
@@ -215,11 +223,11 @@ class RAGApplication:
     # -------------------------
     # 🧠 Agentic Routing Logic
     # -------------------------
-    def ask_question(self, question: str, top_k: int = 5, temperature: float = 0.3) -> dict:
+    def ask_question(self, user_id: str, question: str, top_k: int = 5, temperature: float = 0.3) -> dict:
         query_embedding = self.generate_embeddings(question)
         
-        # Phase 1: Local Knowledge Search (Astra DB)
-        docs = self.vector_db.search_similar_documents(query_embedding, top_k)
+        # Phase 1: Local Knowledge Search (Astra DB - User Specific)
+        docs = self.vector_db.search_similar_documents(user_id, query_embedding, top_k)
         requires_web_search = False
         raw_answer = ""
 
@@ -260,12 +268,10 @@ class RAGApplication:
             try:
                 print("🌐 Local DB missing answer. Triggering Wikipedia Search...")
                 
-                # 🛠️ THE FIX: Rewind the AI's memory so it forgets it just failed!
-                # This prevents the AI from stubbornly repeating "I don't have enough information."
+                # Rewind memory so AI forgets the previous local failure
                 if len(self.chat_session.history) >= 2:
                     self.chat_session.history = self.chat_session.history[:-2]
                 
-                # Search Wikipedia for the top 3 matching articles
                 search_results = wikipedia.search(question, results=3)
                 
                 if not search_results:
@@ -275,7 +281,6 @@ class RAGApplication:
                 for title in search_results:
                     try:
                         page = wikipedia.page(title, auto_suggest=False)
-                        # Extract more text (2000 chars) to ensure we get the answer
                         web_context_blocks.append(f"[Source File: {page.url}]\nTitle: {page.title}\nSnippet: {page.summary[:2000]}")
                     except Exception:
                         pass 
@@ -284,9 +289,6 @@ class RAGApplication:
                     return {"answer": "I found Wikipedia pages, but couldn't extract the text.", "sources": []}
 
                 web_context = "\n\n".join(web_context_blocks)
-                
-                # 🛠️ DEBUGGING: Print the Wikipedia text to your VS Code terminal 
-                # so you can see exactly what the AI is reading!
                 print(f"\n📚 WIKIPEDIA CONTEXT PULLED:\n{web_context[:500]}...\n")
                 
                 web_prompt = f"""
@@ -330,8 +332,8 @@ class RAGApplication:
             "sources": actual_sources
         }
 
-    def get_indexed_documents(self) -> List[str]:
-        return self.vector_db.get_all_documents()
+    def get_indexed_documents(self, user_id: str) -> List[str]:
+        return self.vector_db.get_all_documents(user_id)
 
-    def delete_document(self, doc_name: str) -> int:
-        return self.vector_db.delete_document(doc_name)
+    def delete_document(self, user_id: str, doc_name: str) -> int:
+        return self.vector_db.delete_document(user_id, doc_name)
