@@ -1,0 +1,12 @@
+streamlit
+google-generativeai
+langchain-google-genai
+langchain-text-splitters
+cassandra-driver
+python-dotenv
+PyMuPDF
+Pillow
+pandas
+python-docx
+streamlit-mic-recorder
+wikipedia

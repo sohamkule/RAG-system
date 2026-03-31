@@ -1,0 +1,18 @@
+# Security
+.env
+*.json
+
+# Python & Environments
+.venv/
+__pycache__/
+
+# App temporary files
+temp_uploads/
+
+# Old GUI files (Optional: add these if you don't delete them)
+app.py
+basic.py
+evalute.py
+gui.py
+main_window.py
+maingui.ui
