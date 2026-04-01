@@ -102,13 +102,20 @@ class DocumentLoader:
         try:
             image = Image.open(io.BytesIO(image_bytes))
             model = genai.GenerativeModel("gemini-2.5-flash-lite")
+            
+            # 🛠️ UPDATED PROMPT: Strict extraction rules
             prompt = """
-            Analyze this image, chart, or diagram in detail. 
-            Extract any text, data points, trends, or key visual information. 
-            Write a comprehensive summary so that a text-search algorithm can understand what this image contains.
+            You are a highly precise data extraction AI. Analyze this image, chart, or diagram. 
+            CRITICAL RULE: DO NOT write introductory meta-commentary like 'This image contains...'. 
+            
+            TASK:
+            1. Extract ALL visible text, titles, and labels.
+            2. If it is a chart, explicitly list the X and Y axes, the legend, and the specific data values or trends shown.
+            3. Format the output as a highly detailed, raw text report so it can be easily searched.
             """
+            
             response = model.generate_content([prompt, image])
-            return f"\n\n[🖼️ SYSTEM GENERATED IMAGE DESCRIPTION: {response.text}]\n\n"
+            return f"\n\n[🖼️ EXTRACTED VISUAL DATA:\n{response.text}]\n\n"
         except Exception as e:
             return f"\n\n[⚠️ Image Extraction Failed: {str(e)}]\n\n"
 
